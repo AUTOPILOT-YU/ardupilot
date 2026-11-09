@@ -1,129 +1,216 @@
-// -*- tab-width: 4; Mode: C++; c-basic-offset: 4; indent-tabs-mode: nil -*-
+#pragma once
 
 /// @file	AC_PID.h
-/// @brief	Generic PID algorithm, with EEPROM-backed storage of constants.
+/// @brief	General-purpose PID controller with input, error, and derivative filtering, plus slew rate limiting and EEPROM gain storage.
 
-#ifndef __AC_PID_H__
-#define __AC_PID_H__
-
-#include <AP_Common.h>
-#include <AP_Param.h>
+#include <AP_Common/AP_Common.h>
+#include <AP_Param/AP_Param.h>
 #include <stdlib.h>
-#include <math.h>               // for fabs()
+#include <cmath>
+#include <Filter/SlewLimiter.h>
+#include <Filter/NotchFilter.h>
+#include <Filter/AP_Filter.h>
 
-// Examples for _filter:
-// f_cut = 10 Hz -> _alpha = 0.385869
-// f_cut = 15 Hz -> _alpha = 0.485194
-// f_cut = 20 Hz -> _alpha = 0.556864
-// f_cut = 25 Hz -> _alpha = 0.611015
-// f_cut = 30 Hz -> _alpha = 0.653373
-#define AC_PID_D_TERM_FILTER 0.556864f    // Default 100Hz Filter Rate with 20Hz Cutoff Frequency
+#define AC_PID_TFILT_HZ_DEFAULT  0.0f   // default input filter frequency
+#define AC_PID_EFILT_HZ_DEFAULT  0.0f   // default input filter frequency
+#define AC_PID_DFILT_HZ_DEFAULT  20.0f  // default input filter frequency
+#define AC_PID_RESET_TC          0.16f  // Time constant for integrator reset decay to zero
+
+#include "AP_PIDInfo.h"
 
 /// @class	AC_PID
-/// @brief	Object managing one PID control
+/// @brief	Copter PID control class
 class AC_PID {
 public:
 
-    /// Constructor for PID that saves its settings to EEPROM
-    ///
-    /// @note	PIDs must be named to avoid either multiple parameters with the
-    ///			same name, or an overly complex constructor.
-    ///
-    /// @param  initial_p       Initial value for the P term.
-    /// @param  initial_i       Initial value for the I term.
-    /// @param  initial_d       Initial value for the D term.
-    /// @param  initial_imax    Initial value for the imax term.4
-    ///
-    AC_PID(
-        const float &   initial_p = 0.0,
-        const float &   initial_i = 0.0,
-        const float &   initial_d = 0.0,
-        const int16_t & initial_imax = 0.0):
-        _integrator(0),
-        _last_input(0),
-        _last_derivative(0),
-        _d_lpf_alpha(AC_PID_D_TERM_FILTER)
-    {
-		AP_Param::setup_object_defaults(this, var_info);
+    struct Defaults {
+        float p;
+        float i;
+        float d;
+        float ff;
+        float imax;
+        float filt_T_hz;
+        float filt_E_hz;
+        float filt_D_hz;
+        float srmax;
+        float srtau;
+        float dff;
+    };
 
-        _kp = initial_p;
-        _ki = initial_i;
-        _kd = initial_d;
-        _imax = abs(initial_imax);
+    /// Constructor for PID controller with EEPROM-backed gain.
+    /// Parameters are initialized from defaults or EEPROM at runtime.
+    AC_PID(float initial_p, float initial_i, float initial_d, float initial_ff, float initial_imax, float initial_filt_T_hz, float initial_filt_E_hz, float initial_filt_D_hz,
+           float initial_srmax=0, float initial_srtau=1.0, float initial_dff=0);
+    AC_PID(const AC_PID::Defaults &defaults) :
+        AC_PID(
+            defaults.p,
+            defaults.i,
+            defaults.d,
+            defaults.ff,
+            defaults.imax,
+            defaults.filt_T_hz,
+            defaults.filt_E_hz,
+            defaults.filt_D_hz,
+            defaults.srmax,
+            defaults.srtau,
+            defaults.dff
+            )
+        { }
 
-		// derivative is invalid on startup
-		_last_derivative = NAN;
+    CLASS_NO_COPY(AC_PID);
+
+    // Computes the PID output using a target and measurement input.
+    // Applies filters to the target and error, calculates the derivative and updates the integrator.
+    // If `limit` is true, the integrator is allowed to shrink but not grow.
+    float update_all(float target, float measurement, float dt, bool limit = false, float pd_scale = 1.0f, float i_scale = 1.0f);
+
+    // Computes the PID output from an error input only (target assumed to be zero).
+    // Applies error filtering and updates the derivative and integrator.
+    // Target and measurement must be set separately for logging.
+    // todo: remove function when it is no longer used.
+    float update_error(float error, float dt, bool limit = false);
+
+    // get_pid - get results from pid controller
+    float get_p() const;
+    float get_i() const;
+    float get_d() const;
+    float get_ff() const;
+    float get_ff_component() const;
+    float get_dff_component() const;
+
+    // Used to fully zero the I term between mode changes or initialization
+    void reset_I();
+
+    // Flags the input filter for reset. The next call to `update_all()` will reinitialize the filter using the next input.
+    void reset_filter() {
+        _flags._reset_filter = true;
     }
 
-    /// Iterate the PID, return the new control value
-    ///
-    /// Positive error produces positive output.
-    ///
-    /// @param error	The measured error value
-    /// @param dt		The time delta in milliseconds (note
-    ///					that update interval cannot be more
-    ///					than 65.535 seconds due to limited range
-    ///					of the data type).
-    /// @param scaler	An arbitrary scale factor
-    ///
-    /// @returns		The updated control output.
-    ///
-    float       get_pid(float error, float dt);
-    float       get_pi(float error, float dt);
-    float       get_p(float error) const;
-    float       get_i(float error, float dt);
-    float       get_d(float error, float dt);
+    // Loads controller configuration from EEPROM, including gains and filter frequencies. (not used)
+    void load_gains();
 
-    /// Reset the PID integrator
-    ///
-    void        reset_I();
+    // Saves controller configuration from EEPROM, including gains and filter frequencies. Used by autotune to save gains before tuning.
+    void save_gains();
 
-    /// Load gain properties
-    ///
-    void        load_gains();
+    // get accessors
+    const AP_Float &kP() const { return _kp; }
+    AP_Float &kP() { return _kp; }
+    AP_Float &kI() { return _ki; }
+    AP_Float &kD() { return _kd; }
+    AP_Float &kIMAX() { return _kimax; }
+    AP_Float &kPDMAX() { return _kpdmax; }
+    AP_Float &ff() { return _kff;}
+    AP_Float &filt_T_hz() { return _filt_T_hz; }
+    AP_Float &filt_E_hz() { return _filt_E_hz; }
+    AP_Float &filt_D_hz() { return _filt_D_hz; }
+    AP_Float &slew_limit() { return _slew_rate_max; }
+    AP_Float &kDff() { return _kdff; }
 
-    /// Save gain properties
-    ///
-    void        save_gains();
-    
-    /// Sets filter Alpha for D-term LPF
-    void        set_d_lpf_alpha(int16_t cutoff_frequency, float time_step);
+    float imax() const { return _kimax.get(); }
+    float pdmax() const { return _kpdmax.get(); }
 
-    /// @name	parameter accessors
-    //@{
+    // Returns alpha value for the target low-pass filter (based on filter frequency and dt)
+    float get_filt_T_alpha(float dt) const;
+    // Returns alpha value for the error low-pass filter (based on filter frequency and dt)
+    float get_filt_E_alpha(float dt) const;
+    // Returns alpha value for the derivative low-pass filter (based on filter frequency and dt)
+    float get_filt_D_alpha(float dt) const;
 
-    /// Overload the function call operator to permit relatively easy initialisation
-    void operator        () (const float    p,
-                             const float    i,
-                             const float    d,
-                             const int16_t  imaxval) {
-        _kp = p; _ki = i; _kd = d; _imax = abs(imaxval);
-    }
+    // set accessors
+    void set_kP(const float v) { _kp.set(v); }
+    void set_kI(const float v) { _ki.set(v); }
+    void set_kD(const float v) { _kd.set(v); }
+    void set_ff(const float v) { _kff.set(v); }
+    void set_imax(const float v) { _kimax.set(fabsf(v)); }
+    void set_pdmax(const float v) { _kpdmax.set(fabsf(v)); }
+    void set_filt_T_hz(const float v);
+    void set_filt_E_hz(const float v);
+    void set_filt_D_hz(const float v);
+    void set_slew_limit(const float v);
+    void set_kDff(const float v) { _kdff.set(v); }
 
-    // accessors
-    float       kP() const { return _kp.get(); }
-    float       kI() const { return _ki.get(); }
-    float       kD() const { return _kd.get(); }
-    int16_t     imax() const { return _imax.get(); }
-    void        kP(const float v) { _kp.set(v); }
-    void        kI(const float v) { _ki.set(v); }
-    void        kD(const float v) { _kd.set(v); }
-    void        imax(const int16_t v) { _imax.set(abs(v)); }
-    float       get_integrator() const { return _integrator; }
-    void        set_integrator(float i) { _integrator = i; }
+    // Sets target and actual rate values for external logging (optional).
+    void set_target_rate(float target) { _pid_info.target = target; }
+    void set_actual_rate(float actual) { _pid_info.actual = actual; }
 
-    static const struct AP_Param::GroupInfo        var_info[];
+    // Sets the integrator directly, clamped to the IMAX bounds. Also flags I-term as externally set.
+    void set_integrator(float i);
+
+    // Gradually adjust the integrator toward a desired value using a time constant.
+    // Typically used to "relax" the I-term in dynamic conditions.
+    void relax_integrator(float integrator, float dt, float time_constant);
+
+    // set slew limiter scale factor
+    void set_slew_limit_scale(int8_t scale) { _slew_limit_scale = scale; }
+
+    // Returns current slew rate from the limiter. Returns 0 if SMAX is zero (disabled).
+    float get_slew_rate(void) const { return _slew_limiter.get_slew_rate(); }
+
+    const AP_PIDInfo& get_pid_info(void) const { return _pid_info; }
+
+    // Configures optional notch filters for target and error signals using the given sample rate.
+    // Filters are dynamically allocated and validated via the AP_Filter API.
+    void set_notch_sample_rate(float);
+
+    // parameter var table
+    static const struct AP_Param::GroupInfo var_info[];
 
 protected:
-    AP_Float        _kp;
-    AP_Float        _ki;
-    AP_Float        _kd;
-    AP_Int16        _imax;
 
-    float           _integrator;                                ///< integrator value
-    float           _last_input;                                ///< last input for derivative
-    float           _last_derivative;                           ///< last derivative for low-pass filter
-    float           _d_lpf_alpha;                               ///< alpha used in D-term LPF
+    // Updates the integrator based on current error and dt.
+    // If `limit` is true, the integrator is only allowed to shrink to avoid wind-up.
+    void update_i(float dt, bool limit, float i_scale = 1.0f);
+
+    // parameters
+    AP_Float _kp;
+    AP_Float _ki;
+    AP_Float _kd;
+    AP_Float _kff;
+    AP_Float _kimax;
+    AP_Float _kpdmax;
+    AP_Float _filt_T_hz;         // PID target filter frequency in Hz
+    AP_Float _filt_E_hz;         // PID error filter frequency in Hz
+    AP_Float _filt_D_hz;         // PID derivative filter frequency in Hz
+    AP_Float _slew_rate_max;
+    AP_Float _kdff;
+#if AP_FILTER_ENABLED
+    AP_Int8 _notch_T_filter;
+    AP_Int8 _notch_E_filter;
+#endif
+
+    // Slew rate time constant (tau). Not exposed in this class by default, but defined as an AP_Float so parent classes can make it configurable via param table.
+    AP_Float _slew_rate_tau;
+
+    SlewLimiter _slew_limiter{_slew_rate_max, _slew_rate_tau};
+
+    // flags
+    struct ac_pid_flags {
+        bool _reset_filter :1;  // true if the input filter should be reset on the next call to update_all()
+        bool _I_set :1;         // true if the I term has been set externally, including zeroing
+    } _flags;
+
+    // internal variables
+    float _integrator;        // integrator value
+    float _target;            // target value to enable filtering
+    float _error;             // error value to enable filtering
+    float _derivative;        // derivative value to enable filtering
+    int8_t _slew_limit_scale;
+    float _target_derivative; // target derivative value to enable dff
+#if AP_FILTER_ENABLED
+    NotchFilterFloat* _target_notch;
+    NotchFilterFloat* _error_notch;
+#endif
+
+    AP_PIDInfo _pid_info;
+
+    const float default_kp;
+    const float default_ki;
+    const float default_kd;
+    const float default_kff;
+    const float default_kdff;
+    const float default_kimax;
+    const float default_filt_T_hz;
+    const float default_filt_E_hz;
+    const float default_filt_D_hz;
+    const float default_slew_rate_max;
 };
-
-#endif // __AC_PID_H__

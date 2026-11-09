@@ -12,89 +12,66 @@
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
+#pragma once
 
-#ifndef __AP_FRSKY_TELEM_H__
-#define __AP_FRSKY_TELEM_H__
+#include "AP_Frsky_config.h"
 
-#include <AP_HAL.h>
-#include <AP_Param.h>
-#include <AP_Math.h>
-#include <AP_GPS.h>
-#include <AP_AHRS.h>
-#include <AP_Baro.h>
-#include <AP_BattMonitor.h>
+#if AP_FRSKY_TELEM_ENABLED
 
-/* FrSky sensor hub data IDs */
-#define FRSKY_ID_GPS_ALT_BP     0x01
-#define FRSKY_ID_TEMP1          0x02
-#define FRSKY_ID_RPM            0x03
-#define FRSKY_ID_FUEL           0x04
-#define FRSKY_ID_TEMP2          0x05
-#define FRSKY_ID_VOLTS          0x06
-#define FRSKY_ID_GPS_ALT_AP     0x09
-#define FRSKY_ID_BARO_ALT_BP    0x10
-#define FRSKY_ID_GPS_SPEED_BP   0x11
-#define FRSKY_ID_GPS_LONG_BP    0x12
-#define FRSKY_ID_GPS_LAT_BP     0x13
-#define FRSKY_ID_GPS_COURS_BP   0x14
-#define FRSKY_ID_GPS_DAY_MONTH  0x15
-#define FRSKY_ID_GPS_YEAR       0x16
-#define FRSKY_ID_GPS_HOUR_MIN   0x17
-#define FRSKY_ID_GPS_SEC        0x18
-#define FRSKY_ID_GPS_SPEED_AP   0x19
-#define FRSKY_ID_GPS_LONG_AP    0x1A
-#define FRSKY_ID_GPS_LAT_AP     0x1B
-#define FRSKY_ID_GPS_COURS_AP   0x1C
-#define FRSKY_ID_BARO_ALT_AP    0x21
-#define FRSKY_ID_GPS_LONG_EW    0x22
-#define FRSKY_ID_GPS_LAT_NS     0x23
-#define FRSKY_ID_ACCEL_X        0x24
-#define FRSKY_ID_ACCEL_Y        0x25
-#define FRSKY_ID_ACCEL_Z        0x26
-#define FRSKY_ID_CURRENT        0x28
-#define FRSKY_ID_VARIO          0x30
-#define FRSKY_ID_VFAS           0x39
-#define FRSKY_ID_VOLTS_BP       0x3A
-#define FRSKY_ID_VOLTS_AP       0x3B
+#include "AP_Frsky_Backend.h"
+#include "AP_Frsky_SPort.h"
 
-#define HUB_PORT true
-#define S_PORT false
+class AP_Frsky_Parameters;
 
-class AP_Frsky_Telem
-{
- public:
-    //constructor
-    AP_Frsky_Telem(AP_AHRS &ahrs, AP_BattMonitor &battery) :
-    _initialised(false),
-    _ahrs(ahrs),
-    _battery(battery)
-        {}
+class AP_Frsky_Telem {
 
-    // these enums must match up with TELEM2_PROTOCOL in vehicle code
-    enum FrSkyProtocol {
-        FrSkyDPORT = 2,
-        FrSkySPORT = 3
-    };
+public:
+    AP_Frsky_Telem();
 
-    void init(AP_HAL::UARTDriver *port, uint8_t frsky_type);
-    void send_frames(uint8_t control_mode, enum FrSkyProtocol protocol);
+    ~AP_Frsky_Telem();
 
+    /* Do not allow copies */
+    CLASS_NO_COPY(AP_Frsky_Telem);
 
- private:
-    void frsky_send_data(uint8_t id, int16_t data);
-    void frsky_send_frame1(uint8_t mode);
-    void frsky_send_frame2();
-    void check_sport_input(void);
-	
-    float frsky_format_gps(float dec);
-    void frsky_send_byte(uint8_t value);
-    void frsky_send_hub_startstop();
+    // init - perform required initialisation
+    bool init(bool use_external_data=false);
 
-    AP_HAL::UARTDriver *_port;
-    bool _initialised;
-    AP_AHRS &_ahrs;
-    AP_BattMonitor &_battery;
-    uint32_t _last_frame1_ms;
-    uint32_t _last_frame2_ms;
-};
+    static AP_Frsky_Telem *get_singleton(void) {
+        return singleton;
+    }
+
+    // get next telemetry data for external consumers of SPort data
+    static bool get_telem_data(AP_Frsky_Backend::sport_packet_t* packet_array, uint8_t &packet_count, const uint8_t max_size);
+#if HAL_WITH_FRSKY_TELEM_BIDIRECTIONAL
+    // set telemetry data from external producer of SPort data
+    static bool set_telem_data(const uint8_t frame,const uint16_t appid, const uint32_t data);
 #endif
+
+    void queue_message(MAV_SEVERITY severity, const char *text) {
+        if (_backend == nullptr) {
+            return;
+        }
+        return _backend->queue_text_message(severity, text);
+    }
+
+private:
+
+    AP_Frsky_Backend *_backend;
+    AP_Frsky_Parameters* _frsky_parameters;
+
+    // get next telemetry data for external consumers of SPort data (internal function)
+    bool _get_telem_data(AP_Frsky_Backend::sport_packet_t* packet_array, uint8_t &packet_count, const uint8_t max_size);
+#if HAL_WITH_FRSKY_TELEM_BIDIRECTIONAL
+    // set telemetry data from external producer of SPort data (internal function)
+    bool _set_telem_data(const uint8_t frame, const uint16_t appid, const uint32_t data);
+#endif
+    static void try_create_singleton_for_external_data(void);
+    static AP_Frsky_Telem *singleton;
+
+};
+
+namespace AP {
+    AP_Frsky_Telem *frsky_telem();
+};
+
+#endif  // AP_FRSKY_TELEM_ENABLED

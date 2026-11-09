@@ -1,129 +1,161 @@
-/// -*- tab-width: 4; Mode: C++; c-basic-offset: 4; indent-tabs-mode: nil -*-
+#pragma once
 
-#ifndef __AP_BARO_MS5611_H__
-#define __AP_BARO_MS5611_H__
+#include "AP_Baro_Backend.h"
 
-#include <AP_HAL.h>
-#include "AP_Baro.h"
+#if AP_BARO_MS56XX_ENABLED
 
-#if CONFIG_HAL_BOARD != HAL_BOARD_APM2 && CONFIG_HAL_BOARD != HAL_BOARD_APM1
-#define MS5611_WITH_I2C 1
-#else
-#define MS5611_WITH_I2C 0
+#include <AP_HAL/AP_HAL.h>
+#include <AP_HAL/Semaphores.h>
+#include <AP_HAL/Device.h>
+
+#ifndef HAL_BARO_MS5611_I2C_ADDR
+#define HAL_BARO_MS5611_I2C_ADDR 0x77
 #endif
 
-
-/** Abstract serial device driver for MS5611. */
-class AP_Baro_MS5611_Serial
-{
-public:
-    /** Initialize the driver. */
-    virtual void init() = 0;
-
-    /** Read a 16-bit value from register "reg". */
-    virtual uint16_t read_16bits(uint8_t reg) = 0;
-
-    /** Read a 24-bit value from the ADC. */
-    virtual uint32_t read_adc() = 0;
-
-    /** Write a single byte command. */
-    virtual void write(uint8_t reg) = 0;
-
-    /** Acquire the internal semaphore for this device.
-     * take_nonblocking should be used from the timer process,
-     * take_blocking from synchronous code (i.e. init) */
-    virtual bool sem_take_nonblocking() { return true; }
-    virtual bool sem_take_blocking() { return true; }
-
-    /** Release the internal semaphore for this device. */
-    virtual void sem_give() {}
-};
-
-/** SPI serial device. */
-class AP_Baro_MS5611_SPI : public AP_Baro_MS5611_Serial
-{
-public:
-    virtual void init();
-    virtual uint16_t read_16bits(uint8_t reg);
-    virtual uint32_t read_adc();
-    virtual void write(uint8_t reg);
-    virtual bool sem_take_nonblocking();
-    virtual bool sem_take_blocking();
-    virtual void sem_give();
-
-private:
-    AP_HAL::SPIDeviceDriver *_spi;
-    AP_HAL::Semaphore *_spi_sem;
-};
-
-#if MS5611_WITH_I2C
-/** I2C serial device. */
-class AP_Baro_MS5611_I2C : public AP_Baro_MS5611_Serial
-{
-public:
-    virtual void init();
-    virtual uint16_t read_16bits(uint8_t reg);
-    virtual uint32_t read_adc();
-    virtual void write(uint8_t reg);
-    virtual bool sem_take_nonblocking();
-    virtual bool sem_take_blocking();
-    virtual void sem_give();
-
-private:
-    AP_HAL::Semaphore *_i2c_sem;
-};
-#endif // MS5611_WITH_I2C
-
-class AP_Baro_MS5611 : public AP_Baro
-{
-public:
-    AP_Baro_MS5611(AP_Baro_MS5611_Serial *serial)
-    {
-        _serial = serial;
-    }
-
-    /* AP_Baro public interface: */
-    bool            init();
-    uint8_t         read();
-    float           get_pressure(); // in mbar*100 units
-    float           get_temperature() const; // in celsius degrees
-
-
-    /* Serial port drivers to pass to "init". */
-    static AP_Baro_MS5611_SPI spi;
-#if MS5611_WITH_I2C
-    static AP_Baro_MS5611_I2C i2c;
+#ifndef HAL_BARO_MS5611_I2C_ADDR2
+#define HAL_BARO_MS5611_I2C_ADDR2 0x76
 #endif
 
-private:
-    void            _calculate();
-    /* Asynchronous handler functions: */
-    void                            _update();
-
-#if CONFIG_HAL_BOARD != HAL_BOARD_APM2
-    bool check_crc(void);
+#ifndef HAL_BARO_MS5607_I2C_ADDR
+#define HAL_BARO_MS5607_I2C_ADDR 0x77
 #endif
 
-    /* Asynchronous state: */
-    static volatile bool            _updated;
-    static volatile uint8_t         _d1_count;
-    static volatile uint8_t         _d2_count;
-    static volatile uint32_t        _s_D1, _s_D2;
-    static uint8_t                  _state;
-    static uint32_t                 _timer;
-    static AP_Baro_MS5611_Serial   *_serial;
-    /* Gates access to asynchronous state: */
-    static bool                     _sync_access;
+#ifndef HAL_BARO_MS5837_I2C_ADDR
+#define HAL_BARO_MS5837_I2C_ADDR 0x76
+#endif
 
-    float                           Temp;
-    float                           Press;
+#ifndef HAL_BARO_MS5637_I2C_ADDR
+#define HAL_BARO_MS5637_I2C_ADDR 0x76
+#endif
 
-    int32_t                         _raw_press;
-    int32_t                         _raw_temp;
+#if AP_BARO_MS5837_ENABLED
+// Determined in https://github.com/ArduPilot/ardupilot/pull/29122#issuecomment-2877269114
+#define MS5837_30BA_02BA_SELECTION_THRESHOLD 37000
+#endif
+
+class AP_Baro_MS56XX : public AP_Baro_Backend
+{
+public:
+    void update() override;
+
+    AP_Baro_MS56XX(AP_Baro &baro, AP_HAL::Device &dev);
+
+protected:
+
+    // convenience methods for derivative classes to call.  Will free
+    // sensor if it can't init it.
+    static AP_Baro_Backend *_probe(AP_Baro &baro, AP_Baro_MS56XX *sensor);
+
+    virtual bool _init();
+
+    bool _read_prom_5611(uint16_t prom[8]);
+    bool _read_prom_5637(uint16_t prom[8]);
+
+    virtual const char *name() const = 0;
+    virtual DevTypes devtype() const = 0;
+
+    uint8_t _instance;
+
+    /* Last compensated values from accumulated sample */
+    float _D1, _D2;
+
     // Internal calibration registers
-    uint16_t                        C1,C2,C3,C4,C5,C6;
-    float                           D1,D2;
+    struct {
+        uint16_t c1, c2, c3, c4, c5, c6;
+    } _cal_reg;
 
+private:
+
+    static AP_Baro_Backend *probe(AP_Baro &baro, AP_HAL::Device &dev);
+
+    /*
+     * Update @accum and @count with the new sample in @val, taking into
+     * account a maximum number of samples given by @max_count; in case
+     * maximum number is reached, @accum and @count are updated appropriately
+     */
+    static void _update_and_wrap_accumulator(uint32_t *accum, uint32_t val,
+                                             uint8_t *count, uint8_t max_count);
+
+    uint16_t _read_prom_word(uint8_t word);
+    uint32_t _read_adc();
+
+    void _timer();
+
+    AP_HAL::Device *_dev;
+
+    /* Shared values between thread sampling the HW and main thread */
+    struct {
+        uint32_t s_D1;
+        uint32_t s_D2;
+        uint8_t d1_count;
+        uint8_t d2_count;
+    } _accum;
+
+    uint8_t _state;
+
+    bool _discard_next;
+
+    virtual bool _read_prom(uint16_t *prom) = 0;
+    virtual void _calculate() = 0;
 };
 
-#endif //  __AP_BARO_MS5611_H__
+#if AP_BARO_MS5607_ENABLED
+class AP_Baro_MS5607 : public AP_Baro_MS56XX
+{
+public:
+    using AP_Baro_MS56XX::AP_Baro_MS56XX;
+    static AP_Baro_Backend *probe(AP_Baro &baro, AP_HAL::Device &dev);
+protected:
+    const char *name() const override { return "MS5607"; }
+    bool _read_prom(uint16_t *prom) override { return _read_prom_5611(prom); }
+    DevTypes devtype() const override { return DEVTYPE_BARO_MS5607; }
+    void _calculate() override;
+};
+#endif  // AP_BARO_MS5607_ENABLED
+
+#if AP_BARO_MS5611_ENABLED
+class AP_Baro_MS5611 : public AP_Baro_MS56XX
+{
+public:
+    using AP_Baro_MS56XX::AP_Baro_MS56XX;
+    static AP_Baro_Backend *probe(AP_Baro &baro, AP_HAL::Device &dev);
+protected:
+    const char *name() const override { return "MS5611"; }
+    bool _read_prom(uint16_t *prom) override { return _read_prom_5611(prom); }
+    DevTypes devtype() const override { return DEVTYPE_BARO_MS5611; }
+    void _calculate() override;
+};
+#endif  // AP_BARO_MS5611_ENABLED
+
+#if AP_BARO_MS5637_ENABLED
+class AP_Baro_MS5637 : public AP_Baro_MS56XX
+{
+public:
+    using AP_Baro_MS56XX::AP_Baro_MS56XX;
+    static AP_Baro_Backend *probe(AP_Baro &baro, AP_HAL::Device &dev);
+protected:
+    const char *name() const override { return "MS5637"; }
+    bool _read_prom(uint16_t *prom) override { return _read_prom_5637(prom); }
+    DevTypes devtype() const override { return DEVTYPE_BARO_MS5637; }
+    void _calculate() override;
+};
+#endif  // AP_BARO_MS5637_ENABLED
+
+#if AP_BARO_MS5837_ENABLED
+class AP_Baro_MS5837 : public AP_Baro_MS56XX
+{
+public:
+    using AP_Baro_MS56XX::AP_Baro_MS56XX;
+    static AP_Baro_Backend *probe(AP_Baro &baro, AP_HAL::Device &dev);
+protected:
+    const char *name() const override { return "MS5837"; }
+    bool _read_prom(uint16_t *prom) override { return _read_prom_5637(prom); }
+    DevTypes devtype() const override;
+    bool _init() override;
+    void _calculate() override;
+    void _calculate_5837_02ba();
+    void _calculate_5837_30ba();
+};
+#endif  // AP_BARO_MS5837_ENABLED
+
+#endif  // AP_BARO_MS56XX_ENABLED

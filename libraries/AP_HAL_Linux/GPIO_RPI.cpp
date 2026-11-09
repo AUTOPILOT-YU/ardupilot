@@ -1,99 +1,76 @@
-#include <AP_HAL.h>
+#include <AP_HAL/AP_HAL.h>
 
-#if CONFIG_HAL_BOARD_SUBTYPE == HAL_BOARD_SUBTYPE_LINUX_NAVIO
+#if HAL_LINUX_GPIO_RPI_ENABLED
 
 #include "GPIO.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <errno.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
+#include "GPIO_RPI.h"
+#include "GPIO_RPI_BCM.h"
+#include "GPIO_RPI_RP1.h"
+#include "Util_RPI.h"
+
+extern const AP_HAL::HAL& hal;
 
 using namespace Linux;
 
-static const AP_HAL::HAL& hal = AP_HAL_BOARD_DRIVER;
-LinuxGPIO_RPI::LinuxGPIO_RPI()
-{}
-
-void LinuxGPIO_RPI::init()
+GPIO_RPI::GPIO_RPI()
 {
-    // open /dev/mem
-    if ((mem_fd = open("/dev/mem", O_RDWR|O_SYNC) ) < 0) {
-        hal.scheduler->panic("Can't open /dev/mem");
-    }
-
-    // mmap GPIO
-    gpio_map = mmap(
-        NULL,                 // Any adddress in our space will do
-        BLOCK_SIZE,           // Map length
-        PROT_READ|PROT_WRITE, // Enable reading & writting to mapped memory
-        MAP_SHARED,           // Shared with other processes
-        mem_fd,               // File to map
-        GPIO_BASE             // Offset to GPIO peripheral
-    );
-
-    close(mem_fd); // No need to keep mem_fd open after mmap
-
-    if (gpio_map == MAP_FAILED) {
-        hal.scheduler->panic("Can't open /dev/mem");
-    }
-
-    gpio = (volatile uint32_t *)gpio_map; // Always use volatile pointer!
 }
 
-void LinuxGPIO_RPI::pinMode(uint8_t pin, uint8_t output)
+void GPIO_RPI::init()
 {
-    if (output == HAL_GPIO_INPUT) {
-        GPIO_MODE_IN(pin);
-    } else {
-        GPIO_MODE_IN(pin);
-        GPIO_MODE_OUT(pin);
+    const LINUX_BOARD_TYPE rpi_version = UtilRPI::from(hal.util)->detect_linux_board_type();
+
+    switch (rpi_version) {
+        case LINUX_BOARD_TYPE::RPI_ZERO_1:
+        case LINUX_BOARD_TYPE::RPI_2_3_ZERO2:
+        case LINUX_BOARD_TYPE::RPI_4:
+            gpioDriver = NEW_NOTHROW GPIO_RPI_BCM();
+            gpioDriver->init();
+            break;
+        case LINUX_BOARD_TYPE::RPI_5:
+            gpioDriver = NEW_NOTHROW GPIO_RPI_RP1();
+            gpioDriver->init();
+            break;
+        default:
+            AP_HAL::panic("Unknown rpi_version, cannot locate peripheral base address");
+            return;
     }
 }
 
-int8_t LinuxGPIO_RPI::analogPinToDigitalPin(uint8_t pin)
+void GPIO_RPI::pinMode(uint8_t pin, uint8_t output)
 {
-    return -1;
+    gpioDriver->pinMode(pin, output);
 }
 
-uint8_t LinuxGPIO_RPI::read(uint8_t pin)
+void GPIO_RPI::pinMode(uint8_t pin, uint8_t output, uint8_t alt)
 {
-    uint32_t value = GPIO_GET(pin);
-    return value ? 1: 0;
+    gpioDriver->pinMode(pin, output, alt);
 }
 
-void LinuxGPIO_RPI::write(uint8_t pin, uint8_t value)
+uint8_t GPIO_RPI::read(uint8_t pin)
 {
-    if (value == LOW) {
-        GPIO_SET_LOW = 1 << pin;
-    } else {
-        GPIO_SET_HIGH = 1 << pin;
-    }
+    return gpioDriver->read(pin);
 }
 
-void LinuxGPIO_RPI::toggle(uint8_t pin)
+void GPIO_RPI::write(uint8_t pin, uint8_t value)
 {
-    write(pin, !read(pin));
+    gpioDriver->write(pin, value);
+}
+
+void GPIO_RPI::toggle(uint8_t pin)
+{
+    gpioDriver->toggle(pin);
 }
 
 /* Alternative interface: */
-AP_HAL::DigitalSource* LinuxGPIO_RPI::channel(uint16_t n) {
-    return new LinuxDigitalSource(n);
-}
-
-/* Interrupt interface: */
-bool LinuxGPIO_RPI::attach_interrupt(uint8_t interrupt_num, AP_HAL::Proc p, uint8_t mode)
+AP_HAL::DigitalSource* GPIO_RPI::channel(uint16_t n)
 {
-    return true;
+    return NEW_NOTHROW DigitalSource(n);
 }
 
-bool LinuxGPIO_RPI::usb_connected(void)
+bool GPIO_RPI::usb_connected(void)
 {
     return false;
 }
 
-#endif // CONFIG_HAL_BOARD_SUBTYPE == HAL_BOARD_SUBTYPE_LINUX_NAVIO
+#endif  // HAL_LINUX_GPIO_RPI_ENABLED
